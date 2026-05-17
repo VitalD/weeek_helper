@@ -30,10 +30,9 @@ from weeek_kb.add.task_add import (
     process_task_message,
 )
 from weeek_kb.intent import classify_message_intent
-from weeek_kb.projects import Project, guess_project_from_keywords, load_projects, project_by_collection
+from weeek_kb.projects import Project, explicit_project_from_text, load_projects, project_by_collection
 from weeek_kb.search.llm import (
     build_answer_html,
-    detect_project,
     merge_vector_hits,
     pick_top_tasks,
     reformulate_queries,
@@ -437,48 +436,24 @@ async def process_question_query(
         return
 
     projects = load_projects()
-    coll = context.user_data.get(USER_PROJECT)
+    explicit = explicit_project_from_text(text, projects)
 
-    kw = guess_project_from_keywords(text, projects)
-    guessed_llm = await asyncio.to_thread(detect_project, text, projects)
-
-    guessed: Project | None = None
-    if kw and guessed_llm and kw.collection_name != guessed_llm.collection_name:
-        guessed = kw
-        logger.info(
-            "project: keyword=%s overrides llm=%s",
-            kw.collection_name,
-            guessed_llm.collection_name,
-        )
-    elif kw:
-        guessed = kw
-    elif guessed_llm:
-        guessed = guessed_llm
-
-    if guessed:
-        context.user_data[USER_PROJECT] = guessed.collection_name
-        if coll and coll != guessed.collection_name:
-            logger.info("project switch: %s -> %s", coll, guessed.collection_name)
-        await run_pipeline(update, context, text, guessed)
+    if explicit:
+        context.user_data[USER_PROJECT] = explicit.collection_name
+        logger.info("project explicit in text: %s", explicit.collection_name)
+        await run_pipeline(update, context, text, explicit)
         return
 
-    if not coll:
-        context.user_data[USER_PENDING] = text
-        msg = "Не удалось понять, о каком проекте речь. Выбери доску:"
-        markup = _projects_keyboard(projects)
-        if update.callback_query and update.callback_query.message:
-            await update.callback_query.message.reply_text(msg, reply_markup=markup)
-        elif update.message:
-            await update.message.reply_text(msg, reply_markup=markup)
-        return
-
-    proj = project_by_collection(projects, coll)
-    if not proj:
-        context.user_data.pop(USER_PROJECT, None)
-        await _reply_plain(update, context, "Сессия сброшена. Напиши вопрос снова.")
-        return
-
-    await run_pipeline(update, context, text, proj)
+    context.user_data[USER_PENDING] = text
+    msg = (
+        "В вопросе не указан сайт (домен или название проекта). "
+        "Добавьте его в текст или выберите доску:"
+    )
+    markup = _projects_keyboard(projects)
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(msg, reply_markup=markup)
+    elif update.message:
+        await update.message.reply_text(msg, reply_markup=markup)
 
 
 async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:

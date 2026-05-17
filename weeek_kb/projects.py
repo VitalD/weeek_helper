@@ -96,11 +96,65 @@ def guess_project_from_keywords(user_text: str, projects: list[Project]) -> Proj
     """
     Явное упоминание метки проекта в тексте (домен/название из meta.метка).
     """
+    hits = projects_explicitly_mentioned(user_text, projects)
+    if len(hits) == 1:
+        return hits[0]
+    return None
+
+
+def projects_explicitly_mentioned(user_text: str, projects: list[Project]) -> list[Project]:
+    """Проекты, явно названные в тексте: метка, домен, slug доски (без fuzzy и без LLM)."""
+    if not (user_text or "").strip() or not projects:
+        return []
+
     t = user_text.lower().replace("ё", "е")
+    t_norm = _normalize_match_text(user_text)
+    hits: list[Project] = []
+    seen: set[str] = set()
+
     for p in projects:
+        if p.collection_name in seen:
+            continue
         lab = (p.label or "").strip().lower().replace("ё", "е")
         if len(lab) >= 4 and lab in t:
-            return p
+            hits.append(p)
+            seen.add(p.collection_name)
+            continue
+
+        matched = False
+        for variant in _label_variants(p):
+            if len(variant) >= 4 and variant in t_norm:
+                matched = True
+                break
+        if matched:
+            hits.append(p)
+            seen.add(p.collection_name)
+            continue
+
+        for mention in _site_mentions_in_text(user_text):
+            for variant in _label_variants(p):
+                if not variant or len(variant) < 4:
+                    continue
+                if mention == variant or mention in variant or variant in mention:
+                    hits.append(p)
+                    seen.add(p.collection_name)
+                    matched = True
+                    break
+            if matched:
+                break
+
+    return hits
+
+
+def explicit_project_from_text(user_text: str, projects: list[Project]) -> Project | None:
+    """
+    Одна доска, если пользователь явно указал сайт; иначе None (нужен выбор кнопками).
+    """
+    if len(projects) == 1:
+        return projects[0]
+    hits = projects_explicitly_mentioned(user_text, projects)
+    if len(hits) == 1:
+        return hits[0]
     return None
 
 

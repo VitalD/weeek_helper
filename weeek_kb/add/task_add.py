@@ -27,7 +27,7 @@ from weeek_kb.add.weeek_api import (
     member_display_name,
     member_id,
 )
-from weeek_kb.projects import Project, load_projects, match_project_from_text, project_by_collection
+from weeek_kb.projects import Project, explicit_project_from_text, load_projects, project_by_collection
 
 logger = logging.getLogger(__name__)
 
@@ -389,7 +389,7 @@ def _apply_project_from_context(draft: dict[str, Any], projects: list[Project]) 
         return
     messages = draft.get("messages") or []
     combined = " ".join(messages)
-    p = match_project_from_text(combined, projects)
+    p = explicit_project_from_text(combined, projects)
     if p:
         _set_draft_project(draft, p)
 
@@ -580,7 +580,7 @@ async def _ask_missing(
         await _reply(
             update,
             context,
-            "Выберите проект и доску (в Weeek у одного проекта может быть несколько досок):",
+            "В тексте не указан сайт. Добавьте домен в описание задачи или выберите доску:",
             _projects_keyboard_task(projects),
         )
     elif field == "assignee":
@@ -736,12 +736,6 @@ async def _process_task_message_impl(
                 column_names,
             )
             _merge_extracted(draft, extracted)
-            if not draft.get("project_confirmed"):
-                pk = extracted.get("project_key")
-                if pk:
-                    p = project_by_collection(projects, str(pk).strip())
-                    if p:
-                        _set_draft_project(draft, p)
         except Exception:
             logger.exception("extract_task_draft_fields failed")
 
