@@ -39,6 +39,11 @@ from weeek_kb.search.llm import (
     reformulate_queries,
     summarize_overflow_tasks,
 )
+from weeek_kb.search.sensitive_filter import (
+    CREDENTIALS_REFUSAL,
+    filter_merged_hits,
+    is_credentials_related_query,
+)
 from weeek_kb.search.vector_store import query_collection
 from weeek_kb.transcribe import transcribe_audio_bytes
 
@@ -280,6 +285,10 @@ async def run_pipeline(
     user_query: str,
     project: Project,
 ) -> None:
+    if is_credentials_related_query(user_query):
+        await _reply_plain(update, context, CREDENTIALS_REFUSAL)
+        return
+
     chat = update.effective_chat
     if chat:
         await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
@@ -296,7 +305,7 @@ async def run_pipeline(
         )
 
     r1, r2, r3 = await asyncio.gather(one_q(q1), one_q(q2), one_q(q3))
-    merged = merge_vector_hits([r1, r2, r3], TOP_K_AFTER_MERGE)
+    merged = filter_merged_hits(merge_vector_hits([r1, r2, r3], TOP_K_AFTER_MERGE))
 
     if not merged:
         msg = "По этому проекту ничего похожего не нашлось. Переформулируй вопрос или проверь индекс (ingest)."
@@ -421,6 +430,10 @@ async def process_question_query(
     """Вопрос по базе задач: определение проекта и run_pipeline."""
     text = text.strip()
     if not text:
+        return
+
+    if is_credentials_related_query(text):
+        await _reply_plain(update, context, CREDENTIALS_REFUSAL)
         return
 
     projects = load_projects()

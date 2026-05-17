@@ -9,6 +9,7 @@ load_dotenv(ROOT / ".env")
 # Paths (ROOT defined above for dotenv)
 DATA_DIR = ROOT / "data"
 CHROMA_DIR = ROOT / "chroma_db"
+ACTIVE_BOARD_IDS_FILE = DATA_DIR / "active-board-ids.json"
 
 # Weeek workspace in task URLs: https://app.weeek.net/ws/<id>/task/<taskId>
 WEEEK_WORKSPACE_ID = os.getenv("WEEEK_WORKSPACE_ID", "423726")
@@ -18,6 +19,17 @@ WEEEK_TASK_URL_TEMPLATE = os.getenv(
 )
 WEEEK_API_TOKEN = os.getenv("WEEEK_API_TOKEN") or os.getenv("WEEEK_TOKEN")
 WEEEK_API_BASE_URL = os.getenv("WEEEK_API_BASE_URL", "https://api.weeek.net/public/v1").rstrip("/")
+
+# Веб-вход для парсинга комментариев (Playwright)
+WEEEK_EMAIL = (
+    os.getenv("WEEEK_EMAIL")
+    or os.getenv("WEEEK_LOGIN")
+    or ""
+).strip()
+WEEEK_PASSWORD = os.getenv("WEEEK_PASSWORD", "").strip()
+WEEEK_SESSION_FILE = Path(
+    os.getenv("WEEEK_SESSION_FILE", str(DATA_DIR / "weeek-playwright-session.json"))
+)
 TASK_DEFAULT_COLUMN_NAME = os.getenv("TASK_DEFAULT_COLUMN_NAME", "На неделю")
 TASK_DEFAULT_REQUESTER = os.getenv("TASK_DEFAULT_REQUESTER", "Мария")
 

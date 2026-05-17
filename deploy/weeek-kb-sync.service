@@ -1,0 +1,13 @@
+[Unit]
+Description=Weeek KB incremental sync
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/weeek_helper
+ExecStart=/opt/weeek_helper/.venv/bin/python -m weeek_kb.parsing.ingest
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

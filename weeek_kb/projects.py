@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from weeek_kb.config import DATA_DIR
+from weeek_kb.config import ACTIVE_BOARD_IDS_FILE, DATA_DIR
 
 
 @dataclass(frozen=True)
@@ -33,16 +33,46 @@ def collection_name_from_stem(stem: str) -> str:
     return safe[:512]
 
 
-def load_projects(data_dir: Path | None = None) -> list[Project]:
+def load_active_board_ids(path: Path | None = None) -> frozenset[int]:
+    """ID досок из data/active-board-ids.json (поле boardIds)."""
+    ids_path = path or ACTIVE_BOARD_IDS_FILE
+    if not ids_path.is_file():
+        raise FileNotFoundError(
+            f"Нет файла {ids_path}. Создайте его со списком boardIds, например: "
+            '{"boardIds": [6, 24, 25]}'
+        )
+    with open(ids_path, encoding="utf-8") as f:
+        data = json.load(f)
+    raw = data.get("boardIds")
+    if raw is None:
+        raw = data.get("board_ids")
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"В {ids_path} нужен непустой массив boardIds")
+    return frozenset(int(x) for x in raw)
+
+
+def load_projects(
+    data_dir: Path | None = None,
+    *,
+    active_board_ids: frozenset[int] | None = None,
+) -> list[Project]:
     base = data_dir or DATA_DIR
+    ids_file = base / ACTIVE_BOARD_IDS_FILE.name
+    allowed = (
+        active_board_ids
+        if active_board_ids is not None
+        else load_active_board_ids(ids_file if ids_file.is_file() else ACTIVE_BOARD_IDS_FILE)
+    )
     projects: list[Project] = []
-    for path in sorted(base.glob("*.json")):
+    for path in sorted(base.glob("board-*.json")):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         meta = data.get("meta") or {}
+        bid = int(meta.get("boardId") or 0)
+        if bid not in allowed:
+            continue
         label = str(meta.get("метка") or path.stem)
         pid = int(meta.get("projectId") or 0)
-        bid = int(meta.get("boardId") or 0)
         stem = path.stem
         projects.append(
             Project(
@@ -65,34 +95,13 @@ def project_by_collection(projects: list[Project], name: str) -> Project | None:
 
 def guess_project_from_keywords(user_text: str, projects: list[Project]) -> Project | None:
     """
-    Явные упоминания проекта в тексте (метка, фамилия, домен) — приоритетнее «залипшей» сессии.
+    Явное упоминание метки проекта в тексте (домен/название из meta.метка).
     """
     t = user_text.lower().replace("ё", "е")
     for p in projects:
         lab = (p.label or "").strip().lower().replace("ё", "е")
         if len(lab) >= 4 and lab in t:
             return p
-
-    for p in projects:
-        stem = p.file_stem.lower()
-        hints: list[str] = []
-        if "makukhin" in stem:
-            hints.extend(("макухин", "makukhin"))
-        if "avrora-kanc" in stem or ("avrora" in stem and "kanc" in stem):
-            hints.extend(("аврора-канц", "avrora-kanc", "аврора канц"))
-        if "avrorastore" in stem:
-            hints.extend(("avrorastore",))
-        if "textileavenue" in stem:
-            hints.extend(("textileavenue", "textile", "текстиль"))
-        if "akord" in stem and "kazan" in stem:
-            hints.extend(("акорд", "akord"))
-        if "giftec" in stem or "reflection" in stem:
-            hints.extend(("giftec", "giftec-reflection", "reflection"))
-        if "filinteriors" in stem:
-            hints.extend(("filinteriors", "fil interior"))
-        for h in hints:
-            if len(h) >= 3 and h.lower() in t:
-                return p
     return None
 
 

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import tiktoken
 
@@ -13,6 +17,7 @@ from weeek_kb.search.vector_store import create_collection
 
 # OpenAI embedding API: max 8192 tokens per input
 _EMBED_MAX_TOKENS = 8000
+_UPSERT_BATCH = 16
 _tiktoken_enc: tiktoken.Encoding | None = None
 
 
@@ -24,6 +29,16 @@ def _embedding_encoder() -> tiktoken.Encoding:
         except KeyError:
             _tiktoken_enc = tiktoken.get_encoding("cl100k_base")
     return _tiktoken_enc
+
+
+def content_hash(document: str) -> str:
+    """SHA256 (first 16 hex) of normalized document text for change detection."""
+    normalized = re.sub(r"\s+", " ", document.strip())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def chunk_id(task_id: int, chunk_index: int) -> str:
+    return f"task:{task_id}:{chunk_index}"
 
 
 def truncate_for_embedding(text: str, max_tokens: int = _EMBED_MAX_TOKENS) -> tuple[str, bool]:
@@ -132,20 +147,34 @@ def task_metadata(task: dict, meta: dict) -> dict:
         "project_id": str(int(meta.get("projectId") or 0)),
         "board_id": str(int(meta.get("boardId") or 0)),
         "label": str(meta.get("метка") or "")[:500],
+        "chunk_id_version": "v2",
     }
 
 
-def ingest_file(project: Project, reset: bool) -> int:
+@dataclass
+class IngestPlan:
+    to_add: list[tuple[str, str, dict]] = field(default_factory=list)
+    to_update: list[tuple[str, str, dict]] = field(default_factory=list)
+    to_delete: list[str] = field(default_factory=list)
+    skipped: int = 0
+
+    def summary(self) -> str:
+        return (
+            f"add={len(self.to_add)} update={len(self.to_update)} "
+            f"delete={len(self.to_delete)} skip={self.skipped}"
+        )
+
+
+def build_chunks(project: Project) -> tuple[list[tuple[str, str, dict]], int]:
+    """
+    Read board JSON and return (id, document, metadata) rows plus count of multi-chunk tasks.
+    """
     with open(project.file_path, encoding="utf-8") as f:
         data = json.load(f)
     meta = data.get("meta") or {}
     tasks = data.get("задачи") or []
-    name = project.collection_name
-    col = create_collection(name, reset=reset)
 
-    ids: list[str] = []
-    documents: list[str] = []
-    metadatas: list[dict] = []
+    rows: list[tuple[str, str, dict]] = []
     chunked_tasks = 0
 
     for task in tasks:
@@ -154,24 +183,87 @@ def ingest_file(project: Project, reset: bool) -> int:
         if len(task_chunks) > 1:
             chunked_tasks += 1
         for ci, doc in enumerate(task_chunks):
-            ids.append(f"{tid}_{ci}")
-            documents.append(doc)
+            cid = chunk_id(tid, ci)
             m = task_metadata(task, meta)
             m["chunk_index"] = str(ci)
             m["chunk_total"] = str(len(task_chunks))
-            metadatas.append(m)
+            m["content_hash"] = content_hash(doc)
+            rows.append((cid, doc, m))
 
-    # OpenAI embeddings: max ~300k tokens per request; chunks may be up to _EMBED_MAX_TOKENS each.
-    batch = 16
-    for i in range(0, len(ids), batch):
-        col.add(
-            ids=ids[i : i + batch],
-            documents=documents[i : i + batch],
-            metadatas=metadatas[i : i + batch],
-        )
+    return rows, chunked_tasks
+
+
+def plan_ingest(project: Project, collection: Any) -> IngestPlan:
+    desired_rows, _ = build_chunks(project)
+    desired: dict[str, tuple[str, dict]] = {cid: (doc, meta) for cid, doc, meta in desired_rows}
+
+    existing_raw = collection.get(include=["metadatas"])
+    existing_ids: list[str] = list(existing_raw.get("ids") or [])
+    existing_metas: list[dict | None] = list(existing_raw.get("metadatas") or [])
+
+    existing_hash: dict[str, str | None] = {}
+    for eid, emeta in zip(existing_ids, existing_metas):
+        h = None
+        if emeta and isinstance(emeta, dict):
+            h = emeta.get("content_hash")
+            if h is not None:
+                h = str(h)
+        existing_hash[eid] = h
+
+    plan = IngestPlan()
+    for cid, (doc, meta) in desired.items():
+        stored = existing_hash.get(cid)
+        if stored is None:
+            plan.to_add.append((cid, doc, meta))
+        elif stored == meta["content_hash"]:
+            plan.skipped += 1
+        else:
+            plan.to_update.append((cid, doc, meta))
+
+    desired_ids = set(desired)
+    plan.to_delete = [eid for eid in existing_ids if eid not in desired_ids]
+    return plan
+
+
+def _build_plan_full_reindex(project: Project) -> IngestPlan:
+    rows, _ = build_chunks(project)
+    plan = IngestPlan()
+    plan.to_add = list(rows)
+    return plan
+
+
+def apply_plan(collection: Any, plan: IngestPlan) -> None:
+    upsert_rows = plan.to_add + plan.to_update
+    if upsert_rows:
+        ids = [r[0] for r in upsert_rows]
+        documents = [r[1] for r in upsert_rows]
+        metadatas = [r[2] for r in upsert_rows]
+        for i in range(0, len(ids), _UPSERT_BATCH):
+            collection.upsert(
+                ids=ids[i : i + _UPSERT_BATCH],
+                documents=documents[i : i + _UPSERT_BATCH],
+                metadatas=metadatas[i : i + _UPSERT_BATCH],
+            )
+    if plan.to_delete:
+        collection.delete(ids=plan.to_delete)
+
+
+def ingest_file(project: Project, reset: bool, dry_run: bool = False) -> IngestPlan:
+    col = create_collection(project.collection_name, reset=reset)
+
+    _, chunked_tasks = build_chunks(project)
     if chunked_tasks:
         print(f"  note: {chunked_tasks} task(s) split into multiple chunks (<={_EMBED_MAX_TOKENS} tokens each)")
-    return len(ids)
+
+    if reset:
+        plan = _build_plan_full_reindex(project)
+    else:
+        plan = plan_ingest(project, col)
+
+    if not dry_run:
+        apply_plan(col, plan)
+
+    return plan
 
 
 def main() -> None:
@@ -186,12 +278,17 @@ def main() -> None:
         "--only",
         type=str,
         default=None,
-        help="Only this collection stem (e.g. board-6-avrora-kanc-rf)",
+        help="Only this collection stem (e.g. board-6-avrora-kanc-rf or akord-kazan-ru)",
     )
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="Drop and recreate collections",
+        help="Drop and recreate collections (full reindex)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute ingest plan without writing to Chroma",
     )
     args = parser.parse_args()
 
@@ -202,12 +299,19 @@ def main() -> None:
         if not projects:
             raise SystemExit(f"No project matches --only {args.only!r}")
 
-    total = 0
+    totals = {"add": 0, "update": 0, "delete": 0, "skip": 0}
     for p in projects:
-        n = ingest_file(p, reset=args.reset)
-        print(f"{p.file_path.name} -> collection={p.collection_name} embedding_rows={n}")
-        total += n
-    print(f"Done. Total embedding rows (chunks): {total}")
+        plan = ingest_file(p, reset=args.reset, dry_run=args.dry_run)
+        print(f"{p.file_path.name} -> collection={p.collection_name}  {plan.summary()}")
+        totals["add"] += len(plan.to_add)
+        totals["update"] += len(plan.to_update)
+        totals["delete"] += len(plan.to_delete)
+        totals["skip"] += plan.skipped
+
+    print(
+        f"Done. add={totals['add']} update={totals['update']} "
+        f"delete={totals['delete']} skip={totals['skip']}"
+    )
 
 
 if __name__ == "__main__":

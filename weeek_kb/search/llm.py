@@ -9,6 +9,7 @@ from weeek_kb._openai import get_openai_client
 from weeek_kb.config import OPENAI_CHAT_MODEL, TOP_PRESENT, task_url
 from weeek_kb.projects import Project
 from weeek_kb.search.query_normalize import normalize_search_query
+from weeek_kb.search.sensitive_filter import sanitize_document_text
 
 
 def detect_project(user_query: str, projects: list[Project]) -> Project | None:
@@ -148,7 +149,7 @@ def pick_top_tasks(
                 "column": meta.get("column"),
                 "created": meta.get("created"),
                 "completed": meta.get("completed"),
-                "text": doc[:12000],
+                "text": sanitize_document_text(doc)[:12000],
             }
         )
     system = (
@@ -272,7 +273,7 @@ def _main_docs_payload(
                 "title": m.get("title"),
                 "status": m.get("status"),
                 "column": m.get("column"),
-                "text": id_to_doc.get(tid, ""),
+                "text": sanitize_document_text(id_to_doc.get(tid, "")),
             }
         )
     return out
@@ -286,7 +287,8 @@ def _system_prompt_answer(order: str, n_tasks: int) -> str:
         "Ссылка на задачу и её название уже показываются в интерфейсе отдельно — в поле text для каждой задачи напиши "
         "только то, что из описания и комментариев этой задачи относится к вопросу: сформулируй по смыслу. "
         "Если для ответа нужны конкретные пункты (страницы, URL, списки) — перечисли их выборочно из текста задачи, "
-        "без лишнего шума и без учётных данных, если они не нужны для ответа на вопрос.\n\n"
+        "без лишнего шума. Никогда не выводи пароли, логины, токены, ключи API, FTP/SSH-доступы и прочие секреты — "
+        "даже если они есть во входном text (их не должно быть; если встретишь — опусти).\n\n"
         "Поле text может содержать несколько коротких абзацев и строк со списком (строки с «- »); переносы строк допустимы.\n"
         "Если вопрос про готовность/статус: опирайся на status/column. «Завершена» — можно сказать о завершении по Weeek; "
         "«Активна» / идеи / бэклог — не утверждай, что работа полностью сделана.\n\n"
@@ -363,13 +365,14 @@ def summarize_overflow_tasks(
     if not items:
         return ""
     payload = [
-        {"id": tid, "title": meta.get("title"), "text": doc[:6000]}
+        {"id": tid, "title": meta.get("title"), "text": sanitize_document_text(doc)[:6000]}
         for tid, meta, doc in items
     ]
     system = (
         "По каждой задаче напиши одну короткую строку только по полю text: суть и статус. "
         "Верни ТОЛЬКО JSON: {\"lines\": [{\"task_id\": \"...\", \"blurb\": \"...\"}]} "
-        "в том же порядке, что и список задач. Без HTML. Не выдумывай."
+        "в том же порядке, что и список задач. Без HTML. Не выдумывай. "
+        "Не упоминай пароли, логины и доступы."
     )
     resp = get_openai_client().chat.completions.create(
         model=OPENAI_CHAT_MODEL,

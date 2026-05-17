@@ -57,6 +57,23 @@ def get_board_columns(board_id: int) -> list[dict[str, Any]]:
     return cols if isinstance(cols, list) else []
 
 
+def list_tasks_page(project_id: int, *, offset: int = 0) -> dict[str, Any]:
+    """Страница списка задач проекта (обычно до 20 записей, hasMore для пагинации)."""
+    return _request(
+        "GET",
+        "/tm/tasks",
+        params={"projectId": project_id, "offset": offset},
+    )
+
+
+def get_task(task_id: int | str) -> dict[str, Any]:
+    data = _request("GET", f"/tm/tasks/{task_id}")
+    task = data.get("task")
+    if isinstance(task, dict):
+        return task
+    return data
+
+
 def create_task(payload: dict[str, Any]) -> dict[str, Any]:
     data = _request("POST", "/tm/tasks", json_body=payload)
     task = data.get("task")
