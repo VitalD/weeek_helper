@@ -1,0 +1,17 @@
+[Unit]
+Description=Weeek KB weekly sync (tasks, comments, ingest)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@PROJECT_DIR@
+EnvironmentFile=@PROJECT_DIR@/.env
+Environment=PROJECT_DIR=@PROJECT_DIR@
+Environment=INGEST_DELAY_SECONDS=1200
+ExecStart=/bin/bash @PROJECT_DIR@/deploy/weekly-sync.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

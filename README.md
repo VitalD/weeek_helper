@@ -424,18 +424,21 @@ pytest -v
 
 ## Деплой (systemd)
 
-Шаблоны (пути подставьте под VPS):
-
-- [`deploy/weeek-kb-sync.service`](deploy/weeek-kb-sync.service) — oneshot `ingest`
-- [`deploy/weeek-kb-sync.timer`](deploy/weeek-kb-sync.timer) — ежедневно в 03:30
+Полный чеклист для VPS: [`deploy/DEPLOY_VPS.md`](deploy/DEPLOY_VPS.md).
 
 ```bash
-sudo cp deploy/weeek-kb-sync.service deploy/weeek-kb-sync.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now weeek-kb-sync.timer
+cd /root/rag_project
+bash deploy/install-systemd.sh /root/rag_project
 ```
 
-Бот обычно держат отдельным сервисом (`python -m weeek_kb.bot`). `get_comments` на сервере: `--headless`, сохранённая сессия в `data/weeek-playwright-session.json`.
+- `weeek-kb-bot.service` — Telegram-бот (перезапуск при падении)
+- `weeek-kb-weekly-sync.timer` — воскресенье 03:00: `get_tasks` → `get_comments` → пауза ~20 мин → `ingest`
+
+Разовый полный индекс: `bash deploy/initial-full-index.sh` (при пустом `chroma_db/`).
+
+Устаревший ежедневный только-ingest: `weeek-kb-sync.timer` (отключается скриптом установки).
+
+`get_comments` на сервере: `--headless --resume`, сессия в `data/weeek-playwright-session.json`.
 
 ---
 
