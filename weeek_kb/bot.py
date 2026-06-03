@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html as html_module
+import json
 import logging
 import re
 import secrets
@@ -13,6 +14,7 @@ from telegram.error import BadRequest
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from weeek_kb.config import (
+    DATA_DIR,
     INTENT_CONFIDENCE_THRESHOLD,
     ROOT,
     TELEGRAM_BOT_TOKEN,
@@ -170,6 +172,21 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(msg)
 
 
+def _database_freshness_line() -> str:
+    """Дата из data/meta-info.json (last_date), обновляется после get_tasks."""
+    path = DATA_DIR / "meta-info.json"
+    if not path.is_file():
+        return "📆 Дата актуальности базы неизвестна"
+    try:
+        with open(path, encoding="utf-8") as f:
+            last_date = json.load(f).get("last_date")
+        if last_date:
+            return f"📆 Актуальная база до {last_date}"
+    except (json.JSONDecodeError, OSError):
+        pass
+    return "📆 Дата актуальности базы неизвестна"
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "👋 Привет! Я отвечаю на вопросы по задачам из Weeek и принимаю постановку новых задач.\n\n"
@@ -180,7 +197,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🖊 В ответе будут до трёх релевантных задач со ссылками; остальные совпадения можно открыть кнопкой "
         "«Показать другие задачи».\n\n"
         "🔥 Приоритет задачам в статусе «Завершена», новым задачам. Заниженный приоритет задачам в колонке «Идеи».\n\n"
-        "📆 Актуальная база до 17.04.2026"
+        f"{_database_freshness_line()}"
     )
     if update.message:
         logger.info("cmd_start chat_id=%s", update.effective_chat.id if update.effective_chat else None)
