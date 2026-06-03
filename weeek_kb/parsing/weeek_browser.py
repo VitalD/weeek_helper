@@ -106,7 +106,10 @@ def _is_transient_navigation_error(exc: BaseException) -> bool:
         "err_address_unreachable",
         "err_name_not_resolved",
         "navigation timeout",
+        "timeout exceeded",
         "timeout 120000ms exceeded",
+        "page crashed",
+        "target closed",
         "net::err_",
     )
     return any(n in msg for n in needles)
@@ -409,7 +412,7 @@ def start_browser(
 def harvest_task_comments(page: Page, url: str, wait_ms: int) -> list[dict[str, Any]]:
     """Сбор комментариев — порядок действий как в RNP weeek_enrich_comments.py."""
     print(f"  открываю карточку…", flush=True)
-    goto_with_retries(page, url, wait_until="domcontentloaded", timeout_ms=60_000)
+    goto_with_retries(page, url, wait_until="domcontentloaded", timeout_ms=120_000)
     page.wait_for_timeout(500)
 
     try:
