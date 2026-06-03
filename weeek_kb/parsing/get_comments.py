@@ -181,6 +181,21 @@ def save_board(path: Path, data: dict[str, Any], *, dry_run: bool) -> None:
     tmp.replace(path)
 
 
+def _page_crashed(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "page crashed" in msg or type(exc).__name__ == "TargetClosedError"
+
+
+def _recover_page(context: Any, page: Any) -> Any:
+    """Новая вкладка после crash/закрытия страницы."""
+    try:
+        if page is not None:
+            page.close()
+    except Exception:
+        pass
+    return context.new_page()
+
+
 def _fetched_today(task: dict[str, Any]) -> bool:
     raw = task.get("commentsFetchedAt")
     if not isinstance(raw, str) or not raw.strip():
@@ -281,6 +296,7 @@ def enrich_file(
     page: Any,
     path: Path,
     *,
+    context: Any | None = None,
     anchor: date,
     wait_ms: int,
     limit_tasks: int,
@@ -292,12 +308,13 @@ def enrich_file(
     force_refresh: bool,
     replace_comments: bool,
     progress_sidecar: bool,
-) -> tuple[int, int, int]:
+    skip_task_ids: frozenset[int] | None = None,
+) -> tuple[int, int, int, Any]:
     data = load_board(path)
     tasks = data.get("задачи")
     if not isinstance(tasks, list):
         print(f"Пропуск {path}: нет массива задачи[]", file=sys.stderr)
-        return 0, 0, 0
+        return 0, 0, 0, page
 
     eligible: list[int] = []
     for i, task in enumerate(tasks):
@@ -310,7 +327,7 @@ def enrich_file(
 
     if only_task_id is not None and not eligible:
         print(f"Задача id={only_task_id} не найдена или не подходит под фильтр в {path}", file=sys.stderr)
-        return 0, 0, 0
+        return 0, 0, 0, page
 
     sidecar_path: Path | None = None
     if progress_sidecar and not dry_run:
@@ -319,8 +336,10 @@ def enrich_file(
         print(f"  -> progress-log: {sidecar_path}", flush=True)
     n_done = 0
     n_skipped = 0
+    n_failed = 0
     n_filtered_out = len(tasks) - len(eligible) if only_task_id is None else 0
     total_new = 0
+    skip_ids = skip_task_ids or frozenset()
 
     for idx in eligible:
         if limit_tasks and n_done >= limit_tasks:
@@ -328,13 +347,30 @@ def enrich_file(
         task = tasks[idx]
         tid = int(task["id"])
 
+        if tid in skip_ids:
+            print(f"  задача {tid}: пропуск (--skip-task-id)", flush=True)
+            n_skipped += 1
+            continue
+
         if resume and not force_refresh and _fetched_today(task):
             n_skipped += 1
             continue
 
         url = task_url(tid)
         print(f"  задача {tid}: {url}", flush=True)
-        raw_rows = harvest_task_comments(page, url, wait_ms)
+        try:
+            raw_rows = harvest_task_comments(page, url, wait_ms)
+        except Exception as e:
+            n_failed += 1
+            print(
+                f"  [ошибка] задача {tid}: {e!s} — пропуск, продолжаем",
+                file=sys.stderr,
+                flush=True,
+            )
+            if context is not None and _page_crashed(e):
+                page = _recover_page(context, page)
+                print("  [recover] открыта новая вкладка браузера", flush=True)
+            continue
         parsed = dom_rows_to_comments(raw_rows)
         existing_list = (
             task.get("comments") if isinstance(task.get("comments"), list) else []
@@ -379,9 +415,11 @@ def enrich_file(
                 sf.write(line + "\n")
 
     if n_skipped:
-        print(f"  -> пропущено (resume, уже сегодня): {n_skipped}", flush=True)
+        print(f"  -> пропущено (resume / --skip-task-id): {n_skipped}", flush=True)
+    if n_failed:
+        print(f"  -> ошибок (пропущены задачи): {n_failed}", flush=True)
 
-    return n_done, total_new, n_filtered_out
+    return n_done, total_new, n_filtered_out, page
 
 
 def fetch_comments(
@@ -404,6 +442,7 @@ def fetch_comments(
     sidecar_dir: Path | None = None,
     replace_comments: bool = False,
     progress_sidecar: bool = False,
+    skip_task_ids: frozenset[int] | None = None,
 ) -> None:
     paths = discover_paths(data_dir, files)
     if not paths:
@@ -440,9 +479,10 @@ def fetch_comments(
         grand_new = 0
         for path in paths:
             print(f"=== {path.name} ===", flush=True)
-            t, c, _ = enrich_file(
+            t, c, _, page = enrich_file(
                 page,
                 path,
+                context=context,
                 anchor=anchor,
                 wait_ms=wait_ms,
                 limit_tasks=limit_tasks,
@@ -454,6 +494,7 @@ def fetch_comments(
                 force_refresh=force_refresh,
                 replace_comments=replace_comments,
                 progress_sidecar=progress_sidecar,
+                skip_task_ids=skip_task_ids,
             )
             grand_tasks += t
             grand_new += c
@@ -499,6 +540,13 @@ def main() -> None:
     parser.add_argument("--wait-ms", type=int, default=2000)
     parser.add_argument("--limit-tasks", type=int, default=0)
     parser.add_argument("--only-task-id", type=int, default=None)
+    parser.add_argument(
+        "--skip-task-id",
+        type=int,
+        action="append",
+        default=None,
+        help="Не обрабатывать эти id (можно указать несколько раз)",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--manual-login", action="store_true")
     parser.add_argument("--cookie", default="")
@@ -549,6 +597,7 @@ def main() -> None:
     if not last_date_raw:
         raise SystemExit(f"В {META_FILENAME} нет поля last_date")
     anchor = parse_meta_date(str(last_date_raw))
+    skip_ids = frozenset(args.skip_task_id) if args.skip_task_id else None
 
     fetch_comments(
         args.data_dir,
@@ -569,6 +618,7 @@ def main() -> None:
         sidecar_dir=args.sidecar_dir,
         replace_comments=args.replace_comments,
         progress_sidecar=args.progress_sidecar,
+        skip_task_ids=skip_ids,
     )
 
 
