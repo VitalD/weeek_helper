@@ -153,13 +153,20 @@ async def _send_overflow_html(context: ContextTypes.DEFAULT_TYPE, chat_id: int, 
     chunks = _split_html_by_p_blocks(raw)
     try:
         for chunk in chunks:
-            await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=ParseMode.HTML)
+            await _with_telegram_retry(
+                lambda c=chunk: context.bot.send_message(
+                    chat_id=chat_id, text=c, parse_mode=ParseMode.HTML
+                )
+            )
             await asyncio.sleep(0.05)
     except BadRequest as e:
         logger.warning("overflow HTML rejected, sending plain: %s", e)
         plain = _html_to_plain_fallback(raw)
         for i in range(0, len(plain), TG_HTML_MAX):
-            await context.bot.send_message(chat_id=chat_id, text=plain[i : i + TG_HTML_MAX])
+            part = plain[i : i + TG_HTML_MAX]
+            await _with_telegram_retry(
+                lambda p=part: context.bot.send_message(chat_id=chat_id, text=p)
+            )
             await asyncio.sleep(0.05)
 
 
@@ -330,11 +337,22 @@ async def on_show_all_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await _send_overflow_html(context, chat.id, html)
         context.bot_data.pop(key, None)
+    except _RETRYABLE_TG:
+        logger.exception("send overflow failed: network")
+        if query.message:
+            await _with_telegram_retry(
+                lambda: query.message.reply_text(
+                    "Не удалось отправить список задач — сеть до Telegram нестабильна. "
+                    "Нажмите кнопку ещё раз через минуту."
+                )
+            )
     except Exception:
         logger.exception("send overflow failed")
         if query.message:
-            await query.message.reply_text(
-                "Не удалось отправить список задач. Задай вопрос ещё раз или открой weeek_kb.log.",
+            await _with_telegram_retry(
+                lambda: query.message.reply_text(
+                    "Не удалось отправить список задач. Задай вопрос ещё раз или открой weeek_kb.log."
+                )
             )
 
 
