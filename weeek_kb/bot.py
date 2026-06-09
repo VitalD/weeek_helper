@@ -193,6 +193,28 @@ async def _with_telegram_retry(awaitable_factory, *, attempts: int = 4) -> Any:
     raise last
 
 
+async def _try_typing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Индикатор «печатает…» — необязателен; при сбое сети не роняем обработку."""
+    chat = update.effective_chat
+    if not chat:
+        return
+    try:
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except _RETRYABLE_TG:
+        logger.debug("typing skipped: %s", chat.id)
+    except Exception:
+        logger.debug("typing skipped", exc_info=True)
+
+
+async def _try_typing_chat(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    except _RETRYABLE_TG:
+        logger.debug("typing skipped: chat_id=%s", chat_id)
+    except Exception:
+        logger.debug("typing skipped", exc_info=True)
+
+
 def _database_freshness_line() -> str:
     """Дата из data/meta-info.json (last_date), обновляется после get_tasks."""
     path = DATA_DIR / "meta-info.json"
@@ -322,13 +344,31 @@ async def run_pipeline(
     user_query: str,
     project: Project,
 ) -> None:
+    try:
+        await _run_pipeline_inner(update, context, user_query, project)
+    except Exception:
+        logger.exception("run_pipeline failed for project=%s", project.collection_name)
+        await _reply_plain(
+            update,
+            context,
+            "Не удалось обработать запрос (сеть или OpenAI недоступны с сервера). "
+            "Попробуйте позже или сообщите администратору.",
+        )
+
+
+async def _run_pipeline_inner(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user_query: str,
+    project: Project,
+) -> None:
     if is_credentials_related_query(user_query):
         await _reply_plain(update, context, CREDENTIALS_REFUSAL)
         return
 
     chat = update.effective_chat
     if chat:
-        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        await _try_typing_chat(context, chat.id)
 
     q1, q2, q3 = reformulate_queries(user_query)
     logger.info("Queries: %r | %r | %r", q1, q2, q3)
@@ -356,7 +396,7 @@ async def run_pipeline(
     id_to_doc = {t[0]: t[3] for t in merged}
 
     if chat:
-        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        await _try_typing_chat(context, chat.id)
     top3_ids, insufficient = await asyncio.to_thread(pick_top_tasks, user_query, merged)
     top3_ids = top3_ids[:3]
     if insufficient or not top3_ids:
@@ -372,7 +412,7 @@ async def run_pipeline(
     rest_tuples = [t for t in merged if t[0] not in top_set][:TOP_OVERFLOW]
 
     if chat:
-        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        await _try_typing_chat(context, chat.id)
     answer_html = await asyncio.to_thread(
         build_answer_html,
         user_query,
@@ -384,7 +424,7 @@ async def run_pipeline(
     overflow_token: str | None = None
     if rest_tuples:
         if chat:
-            await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+            await _try_typing_chat(context, chat.id)
         overflow_items = [(tid, id_to_meta[tid], id_to_doc[tid]) for tid, _, _, _ in rest_tuples]
         overflow_html = await asyncio.to_thread(
             summarize_overflow_tasks,
@@ -411,9 +451,11 @@ async def _reply_plain(
     text: str,
 ) -> None:
     if update.callback_query and update.callback_query.message:
-        await update.callback_query.message.reply_text(text)
+        await _with_telegram_retry(
+            lambda: update.callback_query.message.reply_text(text)
+        )
     elif update.message:
-        await update.message.reply_text(text)
+        await _with_telegram_retry(lambda: update.message.reply_text(text))
 
 
 async def _reply_html(
@@ -511,7 +553,7 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     chat = update.effective_chat
     if chat:
-        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        await _try_typing(update, context)
 
     try:
         intent, conf = await asyncio.to_thread(classify_message_intent, text)
@@ -530,9 +572,11 @@ async def process_user_query(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     context.user_data[USER_PENDING_INTENT] = text
-    await update.message.reply_text(
-        "Не уверен, что вы имели в виду. Уточните:",
-        reply_markup=_intent_keyboard(),
+    await _with_telegram_retry(
+        lambda: update.message.reply_text(
+            "Не уверен, что вы имели в виду. Уточните:",
+            reply_markup=_intent_keyboard(),
+        )
     )
 
 
@@ -553,7 +597,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     chat = update.effective_chat
     if chat:
-        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+        await _try_typing(update, context)
     try:
         tg_file = await context.bot.get_file(update.message.voice.file_id)
         data = bytes(await tg_file.download_as_bytearray())
