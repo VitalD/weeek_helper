@@ -10,8 +10,9 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.request import HTTPXRequest
 
 from weeek_kb.config import (
     DATA_DIR,
@@ -172,6 +173,26 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(msg)
 
 
+_RETRYABLE_TG = (NetworkError, TimedOut)
+
+
+async def _with_telegram_retry(awaitable_factory, *, attempts: int = 4) -> Any:
+    """Повтор sendMessage при кратковременных сбоях сети на VPS."""
+    last: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await awaitable_factory()
+        except _RETRYABLE_TG as e:
+            last = e
+            if attempt >= attempts:
+                raise
+            delay = min(8.0, 0.5 * (2 ** (attempt - 1)))
+            logger.warning("Telegram retry %s/%s: %s", attempt, attempts, e)
+            await asyncio.sleep(delay)
+    assert last is not None
+    raise last
+
+
 def _database_freshness_line() -> str:
     """Дата из data/meta-info.json (last_date), обновляется после get_tasks."""
     path = DATA_DIR / "meta-info.json"
@@ -201,7 +222,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     if update.message:
         logger.info("cmd_start chat_id=%s", update.effective_chat.id if update.effective_chat else None)
-        await update.message.reply_text(text)
+        await _with_telegram_retry(lambda: update.message.reply_text(text))
 
 
 async def on_intent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -410,16 +431,16 @@ async def _reply_html(
             is_last = i == len(chunks) - 1
             markup = keyboard if is_last else None
             if update.callback_query and update.callback_query.message:
-                await update.callback_query.message.reply_text(
-                    chunk,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
+                await _with_telegram_retry(
+                    lambda c=chunk, m=markup: update.callback_query.message.reply_text(
+                        c, parse_mode=ParseMode.HTML, reply_markup=m
+                    )
                 )
             elif update.message:
-                await update.message.reply_text(
-                    chunk,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=markup,
+                await _with_telegram_retry(
+                    lambda c=chunk, m=markup: update.message.reply_text(
+                        c, parse_mode=ParseMode.HTML, reply_markup=m
+                    )
                 )
             if not is_last:
                 await asyncio.sleep(0.05)
@@ -564,10 +585,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled exception in handler: %s", context.error)
     if isinstance(update, Update) and update.effective_chat:
+        err = context.error
+        if isinstance(err, _RETRYABLE_TG):
+            msg = "Сеть до Telegram временно недоступна. Попробуйте ещё раз через минуту."
+        else:
+            msg = "Произошла внутренняя ошибка. Подробности в файле weeek_kb.log рядом с ботом."
         try:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="Произошла внутренняя ошибка. Подробности в файле weeek_kb.log рядом с ботом.",
+            await _with_telegram_retry(
+                lambda: context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
             )
         except Exception:
             logger.exception("Failed to notify user about error")
@@ -578,7 +603,14 @@ def main() -> None:
         raise SystemExit("TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN) is not set")
 
     logger.info("Log file: %s", LOG_PATH.resolve())
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+        connection_pool_size=8,
+    )
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
     app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
